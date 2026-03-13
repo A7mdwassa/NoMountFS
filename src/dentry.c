@@ -1,0 +1,133 @@
+/*
+ *NoMountFS: Dentry operations
+ *Managing path name cache.
+ */
+
+#include "nomount.h"
+#include "compat.h"
+
+/* *nomount_d_revalidate: checks if our cached dentry is still valid 
+ *compared to the real one on disk.
+ */
+static int nomount_d_revalidate(struct dentry *dentry, unsigned int flags)
+{
+	struct path lower_path;
+	struct dentry *lower_dentry;
+	int valid = 1;
+
+	if (flags & LOOKUP_RCU)
+		return -ECHILD;
+
+	nomount_get_lower_path(dentry, &lower_path);
+	lower_dentry = lower_path.dentry;
+
+	/* If the lower filesystem dentry has its own revalidate, call it */
+	if (lower_dentry->d_op && lower_dentry->d_op->d_revalidate)
+		valid = lower_dentry->d_op->d_revalidate(lower_dentry, flags);
+
+	/* Check if the lower inode has changed unexpectedly */
+	if (d_really_is_positive(dentry) && d_really_is_positive(lower_dentry)) {
+		if (d_inode(dentry)->i_ino != d_inode(lower_dentry)->i_ino)
+			valid = 0;
+	}
+
+	nomount_put_lower_path(dentry, &lower_path);
+	return valid;
+}
+
+/* *nomount_d_release: cleanup when a dentry is destroyed.
+ */
+static void nomount_d_release(struct dentry *dentry)
+{
+	/* Free the private data and release the lower path reference */
+	free_dentry_private_data(dentry);
+}
+
+static struct dentry *nomount_d_real(struct dentry *dentry,
+				     const struct inode *inode)
+{
+	struct dentry *lower_dentry;
+	struct path lower_path;
+	struct dentry *real_dentry;
+
+	if (inode && d_inode(dentry) == inode)
+		return dentry;
+
+	nomount_get_lower_path(dentry, &lower_path);
+	lower_dentry = lower_path.dentry;
+
+	if (lower_dentry && lower_dentry->d_op && lower_dentry->d_op->d_real) {
+		real_dentry = lower_dentry->d_op->d_real(lower_dentry, inode);
+	} else {
+		real_dentry = lower_dentry;
+	}
+
+	nomount_put_lower_path(dentry, &lower_path);
+	return real_dentry;
+}
+
+/* *nomount_d_delete: Decides if a dentry should be cached when its refcount hits 0.
+ */
+static int nomount_d_delete(const struct dentry *dentry)
+{
+	struct path lower_path;
+	struct dentry *lower_dentry;
+	int err = 0;
+
+	if (!dentry->d_fsdata)
+		return 1;
+
+	nomount_get_lower_path(dentry, &lower_path);
+	lower_dentry = lower_path.dentry;
+
+	if (lower_dentry) {
+		/* If the original dentry is no longer cached (was deleted/moved),
+		 * we must also disappear from the cache.
+		 */
+		if (d_unhashed(lower_dentry))
+			err = 1;
+
+		else if (lower_dentry->d_op && lower_dentry->d_op->d_delete)
+			err = lower_dentry->d_op->d_delete(lower_dentry);
+	}
+
+	nomount_put_lower_path(dentry, &lower_path);
+	return err;
+}
+
+/* Dentry operations vector */
+const struct dentry_operations nomount_dops = {
+	.d_revalidate	= nomount_d_revalidate,
+	.d_release		= nomount_d_release,
+	.d_real			= nomount_d_real,
+	.d_delete	    = nomount_d_delete, 
+};
+
+/* Helper to allocate private dentry data */
+int new_dentry_private_data(struct dentry *dentry)
+{
+	struct nomount_dentry_info *info;
+
+	info = kzalloc(sizeof(struct nomount_dentry_info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+
+	spin_lock_init(&info->lock);
+	dentry->d_fsdata = info;
+	return 0;
+}
+
+void free_dentry_private_data(struct dentry *dentry)
+{
+    struct nomount_dentry_info *info = NOMOUNT_D(dentry);
+
+    if (info) {
+        /* Only put the path if it's actually there */
+        if (info->lower_path.dentry) {
+            path_put(&info->lower_path);
+            info->lower_path.dentry = NULL; 
+        }
+        kfree(info);
+        dentry->d_fsdata = NULL;
+    }
+}
