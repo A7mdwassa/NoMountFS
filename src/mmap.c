@@ -8,6 +8,9 @@
 
 /* * nomount_fault: Handles page faults by redirection.
  * Using a local VMA copy prevents race conditions in multi-threaded apps.
+ * Note: nomount_lower_file returns the topmost branch file (lower_files[0]),
+ * which is exactly what we want since files (non-directories) are only opened
+ * from their topmost layer.
  */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 static vm_fault_t nomount_fault(struct vm_fault *vmf)
@@ -116,6 +119,7 @@ const struct vm_operations_struct nomount_vm_ops = {
 };
 
 /* * nomount_mmap: Establishes the memory mapping.
+ * Only the topmost shadowed file (lower_files[0]) is mapped into memory.
  */
 int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 {
