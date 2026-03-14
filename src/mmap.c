@@ -130,24 +130,23 @@ int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 	if (!lower_file->f_op->mmap)
 		return -ENODEV;
 
-	/* 1. Trap the lower vm_ops by calling lower mmap */
-	if (!NOMOUNT_F(file)->lower_vm_ops) {
-		vma->vm_file = lower_file;
-		err = lower_file->f_op->mmap(lower_file, vma);
-		vma->vm_file = file;
+	/*1. Call the lower mmap ALWAYS to initialize the VMA correctly */
+	vma->vm_file = lower_file;
+	err = lower_file->f_op->mmap(lower_file, vma);
+	vma->vm_file = file;
 
-		if (err) return err;
-		saved_vm_ops = vma->vm_ops;
-	}
+	if (err) 
+		return err;
+
+	/* Save original operations only the first time */
+	if (!NOMOUNT_F(file)->lower_vm_ops)
+		NOMOUNT_F(file)->lower_vm_ops = vma->vm_ops;
 
 	/* 2. Setup our stacked operations */
 	vma->vm_ops = &nomount_vm_ops;
 	
 	/* 3. Link address space operations */
 	file->f_mapping->a_ops = &nomount_aops;
-
-	if (!NOMOUNT_F(file)->lower_vm_ops)
-		NOMOUNT_F(file)->lower_vm_ops = saved_vm_ops;
 
 	return err;
 }
